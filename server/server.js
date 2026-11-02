@@ -1,7 +1,8 @@
 /**
  * NeighborLink backend entry point.
- * Wires together security middleware, routes, and centralized error handling.
+ * Express application configured for Vercel and local development.
  */
+
 require('dotenv').config();
 
 const express = require('express');
@@ -12,7 +13,7 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 
 const connectDB = require('./config/db');
-require('./config/firebase'); // initialize Firebase Admin early, warns if misconfigured
+require('./config/firebase');
 
 const userRoutes = require('./routes/userRoutes');
 const requestRoutes = require('./routes/requestRoutes');
@@ -24,42 +25,67 @@ const { notFound, errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
 
-// ---- Security & core middleware ----
+// Security and core middleware
 app.use(helmet());
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173', credentials: true }));
+
+app.use(cors({
+  origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+  credentials: true
+}));
+
 app.use(compression());
 app.use(express.json({ limit: '1mb' }));
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
+app.use(
+  morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev')
+);
+
+// Rate limiting
 const limiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX) || 300,
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders: false
 });
+
 app.use('/api', limiter);
 
-// ---- Health check ----
-app.get('/api/health', (req, res) => res.json({ success: true, message: 'NeighborLink API is running.' }));
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'NeighborLink API is running.'
+  });
+});
 
-// ---- Routes ----
+// Connect to database before processing API requests
+app.use('/api', async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// API routes
 app.use('/api/users', userRoutes);
 app.use('/api/requests', requestRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/admin', adminRoutes);
 
-// ---- 404 + centralized error handler ----
+// Error handling
 app.use(notFound);
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+// Local development server
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
 
-async function start() {
-  await connectDB();
-  app.listen(PORT, () => console.log(`[Server] NeighborLink API listening on port ${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`[Server] NeighborLink API listening on port ${PORT}`);
+  });
 }
 
-start();
-
-module.exports = app; // exported for supertest in tests/
+module.exports = app;
