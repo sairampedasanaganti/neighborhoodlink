@@ -1,65 +1,100 @@
 /**
- * MongoDB connection setup using Mongoose.
- * If MONGODB_URI is provided, connects to it.
- * If MONGODB_URI is not provided (or unreachable in local dev), automatically
- * falls back to an in-memory MongoDB instance with seeded demo data for instant execution.
+ * MongoDB connection setup.
+ * Supports MongoDB Atlas in production and in-memory MongoDB locally.
  */
+
 const mongoose = require('mongoose');
 
 let mongodInstance = null;
+let connectionPromise = null;
+let isSeeded = false;
 
 async function connectDB() {
-  let uri = process.env.MONGODB_URI;
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
+  }
 
-  if (!uri || uri.includes('<username>') || uri.includes('your-mongodb-uri')) {
-    console.log('[DB] No valid MONGODB_URI found. Initializing local in-memory MongoDB...');
-    try {
+  if (connectionPromise) {
+    return connectionPromise;
+  }
+
+  connectionPromise = (async () => {
+    let uri = process.env.MONGODB_URI;
+
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    const invalidUri =
+      !uri ||
+      uri.includes('<username>') ||
+      uri.includes('your-mongodb-uri');
+
+    if (invalidUri && isProduction) {
+      throw new Error('MONGODB_URI must be configured in production.');
+    }
+
+    mongoose.set('strictQuery', true);
+
+    // Production must use a persistent MongoDB database.
+    if (invalidUri) {
+      console.log('[DB] Starting local in-memory MongoDB...');
+
       const { MongoMemoryServer } = require('mongodb-memory-server');
+
       mongodInstance = await MongoMemoryServer.create();
       uri = mongodInstance.getUri();
-      console.log(`[DB] In-memory MongoDB started at: ${uri}`);
-    } catch (memErr) {
-      console.error('[DB] Failed to start in-memory MongoDB:', memErr.message);
-      process.exit(1);
     }
-  }
+
+    try {
+      await mongoose.connect(uri, {
+        serverSelectionTimeoutMS: 8000,
+        maxPoolSize: 10
+      });
+
+      console.log(`[DB] Connected to MongoDB: ${mongoose.connection.host}`);
+
+    } catch (error) {
+      if (isProduction) {
+        throw error;
+      }
+
+      console.warn('[DB] MongoDB connection failed:', error.message);
+      console.log('[DB] Trying local in-memory MongoDB...');
+
+      await mongoose.disconnect();
+
+      const { MongoMemoryServer } = require('mongodb-memory-server');
+
+      mongodInstance = await MongoMemoryServer.create();
+
+      await mongoose.connect(mongodInstance.getUri());
+
+      console.log('[DB] Connected to fallback in-memory MongoDB.');
+    }
+
+    // Seed only the local in-memory database.
+    if (mongodInstance && !isSeeded) {
+      const { seedDatabase } = require('../seed/seed');
+
+      console.log('[DB] Seeding demo data...');
+
+      await seedDatabase();
+
+      isSeeded = true;
+    }
+
+    return mongoose.connection;
+  })();
 
   try {
-    mongoose.set('strictQuery', true);
-    await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 8000,
-    });
-    console.log(`[DB] MongoDB connected: ${mongoose.connection.host}`);
-
-    // If using in-memory MongoDB or DB is fresh, auto-seed demo data
-    if (mongodInstance) {
-      const { seedDatabase } = require('../seed/seed');
-      console.log('[DB] Auto-seeding in-memory database with demo users and requests...');
-      await seedDatabase();
-    }
-  } catch (err) {
-    console.warn('[DB] MongoDB connection to provided URI failed:', err.message);
-    if (!mongodInstance) {
-      console.log('[DB] Attempting fallback to local in-memory MongoDB...');
-      try {
-        const { MongoMemoryServer } = require('mongodb-memory-server');
-        mongodInstance = await MongoMemoryServer.create();
-        const fallbackUri = mongodInstance.getUri();
-        await mongoose.connect(fallbackUri);
-        console.log(`[DB] Fallback in-memory MongoDB connected: ${fallbackUri}`);
-        const { seedDatabase } = require('../seed/seed');
-        await seedDatabase();
-        return;
-      } catch (fallbackErr) {
-        console.error('[DB] Fallback in-memory MongoDB failed:', fallbackErr.message);
-      }
-    }
-    process.exit(1);
+    return await connectionPromise;
+  } catch (error) {
+    connectionPromise = null;
+    throw error;
   }
-
-  mongoose.connection.on('disconnected', () => {
-    console.warn('[DB] MongoDB disconnected.');
-  });
 }
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('[DB] MongoDB disconnected.');
+});
 
 module.exports = connectDB;
